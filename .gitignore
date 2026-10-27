@@ -1,0 +1,38 @@
+# Python environments and generated files
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# uv cache and project-local Python installations
+.uv-cache/
+.uv-python/
+
+# Build outputs
+build/
+dist/
+
+# Local settings, cached input, and debugging material
+config.json
+Q*.txt
+.learnings/
+.claude/
+.codex/
+.agents/
+.env
+.env.*
+!.env.example
+*.log
+
+# Editor and operating-system files
+.idea/
+.vscode/
+Thumbs.db
+Desktop.ini
+.DS_Store

@@ -1,0 +1,7 @@
+def greet(name):
+    if name:
+        print(f"你好，{name}！")
+    else:
+        print("你好！")
+
+greet("Input Helper")
