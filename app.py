@@ -1,8 +1,8 @@
 import json
 import os
 import sys
+import tempfile
 import threading
-import time
 from pathlib import Path
 
 import ctypes
@@ -10,7 +10,14 @@ from ctypes import wintypes
 
 import keyboard
 
-CONFIG_PATH = Path(__file__).with_name("config.json")
+def get_config_path():
+    if getattr(sys, "frozen", False):
+        local_appdata = os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local"
+        return Path(local_appdata) / "InputHelper" / "config.json"
+    return Path(__file__).with_name("config.json")
+
+
+CONFIG_PATH = get_config_path()
 
 
 PUL = ctypes.POINTER(ctypes.c_ulong)
@@ -216,26 +223,31 @@ class HotkeyListener(threading.Thread):
         self._lock = threading.Lock()
 
     def _register(self):
-        self.type_hotkey_handle = keyboard.add_hotkey(
-            "ctrl+shift+q",
-            self.on_type_hotkey,
-            suppress=True,
-            trigger_on_release=True,
-        )
-        self.stop_hotkey_handle = keyboard.add_hotkey(
-            "ctrl+shift+x",
-            self.on_stop_hotkey,
-            suppress=True,
-            trigger_on_release=True,
-        )
+        if self.stop_hotkey_handle is None:
+            self.stop_hotkey_handle = keyboard.add_hotkey(
+                "ctrl+shift+x",
+                self.on_stop_hotkey,
+                suppress=True,
+                trigger_on_release=False,
+            )
+        if self.type_hotkey_handle is None:
+            self.type_hotkey_handle = keyboard.add_hotkey(
+                "ctrl+shift+q",
+                self.on_type_hotkey,
+                suppress=True,
+                trigger_on_release=True,
+            )
 
-    def _unregister(self):
+    def _unregister_type_hotkey(self):
         if self.type_hotkey_handle is not None:
             try:
                 keyboard.remove_hotkey(self.type_hotkey_handle)
             except (KeyError, ValueError):
                 pass
             self.type_hotkey_handle = None
+
+    def _unregister(self):
+        self._unregister_type_hotkey()
         if self.stop_hotkey_handle is not None:
             try:
                 keyboard.remove_hotkey(self.stop_hotkey_handle)
@@ -248,20 +260,21 @@ class HotkeyListener(threading.Thread):
             with self._lock:
                 self._register()
         except Exception as exc:
+            with self._lock:
+                self._unregister()
             self.on_status(f"热键注册失败：{exc}")
             return
 
         self.on_status("热键已就绪：Ctrl+Shift+Q 输入，Ctrl+Shift+X 停止。")
 
-        while not self.stop_event.is_set():
-            time.sleep(0.1)
+        self.stop_event.wait()
 
         with self._lock:
             self._unregister()
 
     def pause_hotkeys(self):
         with self._lock:
-            self._unregister()
+            self._unregister_type_hotkey()
 
     def resume_hotkeys(self):
         with self._lock:
@@ -361,7 +374,7 @@ class InputHelperApp:
     def start_hotkeys(self):
         self.hotkey_listener = HotkeyListener(
             on_type_hotkey=lambda: self.root.after(0, self.handle_type_hotkey),
-            on_stop_hotkey=lambda: self.root.after(0, self.stop_typing),
+            on_stop_hotkey=self.stop_typing,
             on_status=lambda text: self.root.after(0, self.set_status, text),
         )
         self.hotkey_listener.start()
@@ -467,20 +480,13 @@ class InputHelperApp:
         if not text:
             return True
 
-        if not interval:
-            if self.stop_typing_event.is_set():
-                self.root.after(0, self.set_status, "输入已停止。")
-                return False
-            send_unicode_text(text)
-            return True
-
         for ch in text:
             if self.stop_typing_event.is_set():
-                self.root.after(0, self.set_status, "输入已停止。")
                 return False
             send_unicode_text(ch)
-            time.sleep(interval)
-        return True
+            if interval and self.stop_typing_event.wait(interval):
+                return False
+        return not self.stop_typing_event.is_set()
 
     def type_exact_line(self, line: str, interval: float):
         if not line:
@@ -500,13 +506,14 @@ class InputHelperApp:
 
         for line in lines[1:]:
             if self.stop_typing_event.is_set():
-                self.root.after(0, self.set_status, "输入已停止。")
                 return
 
             send_vk_tap(_VK_ESCAPE)
-            time.sleep(min(max(interval, 0.01), 0.03))
+            if self.stop_typing_event.wait(min(max(interval, 0.01), 0.03)):
+                return
             send_vk_tap(_VK_RETURN)
-            time.sleep(enter_settle)
+            if self.stop_typing_event.wait(enter_settle):
+                return
 
             select_to_line_start()
             replacement = line if line else " "
@@ -527,18 +534,19 @@ class InputHelperApp:
         idx = 0
         while idx < len(text):
             if self.stop_typing_event.is_set():
-                self.root.after(0, self.set_status, "输入已停止。")
                 return
             ch = text[idx]
             if ch in ("\n", "\b"):
                 if not flush_text(idx):
                     return
+                if self.stop_typing_event.is_set():
+                    return
                 if ch == "\n":
                     send_vk_tap(_VK_RETURN)
                 else:
                     send_vk_tap(_VK_BACK)
-                if interval:
-                    time.sleep(interval)
+                if interval and self.stop_typing_event.wait(interval):
+                    return
                 run_start = idx + 1
             idx += 1
 
@@ -547,16 +555,18 @@ class InputHelperApp:
     def type_text_worker(self, text: str, start_delay: float, interval: float, tab_size: int, code_mode: bool):
         hotkeys_paused = False
         try:
-            if start_delay:
-                time.sleep(start_delay)
+            if self.stop_typing_event.wait(start_delay):
+                return
 
             if self.hotkey_listener:
                 self.hotkey_listener.pause_hotkeys()
                 hotkeys_paused = True
 
-            time.sleep(0.05)
+            if self.stop_typing_event.wait(0.05):
+                return
             release_modifier_keys()
-            time.sleep(0.02)
+            if self.stop_typing_event.wait(0.02):
+                return
 
             if code_mode:
                 self.type_code_text(text, interval, tab_size)
@@ -570,10 +580,12 @@ class InputHelperApp:
         finally:
             if hotkeys_paused and self.hotkey_listener:
                 self.hotkey_listener.resume_hotkeys()
+            if self.stop_typing_event.is_set():
+                self.root.after(0, self.set_status, "输入已停止。")
 
     def stop_typing(self):
         self.stop_typing_event.set()
-        self.set_status("已请求停止；若正在输入，会在下一字符处停下。")
+        self.root.after(0, self.set_status, "已请求停止；若正在输入，会在下一字符处停下。")
 
     def load_text_file(self):
         file_path = filedialog.askopenfilename(
@@ -616,7 +628,9 @@ class InputHelperApp:
 
         try:
             config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+            return
+        if not isinstance(config, dict):
             return
 
         self.delay_var.set(config.get("start_delay", 0.8))
@@ -637,7 +651,24 @@ class InputHelperApp:
             "code_mode": bool(self.code_mode_var.get()),
             "cached_text": self.get_text(),
         }
-        CONFIG_PATH.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+        temp_path = None
+        try:
+            CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=CONFIG_PATH.parent,
+                prefix=".config-", suffix=".tmp", delete=False,
+            ) as config_file:
+                temp_path = Path(config_file.name)
+                json.dump(config, config_file, ensure_ascii=False, indent=2)
+            temp_path.replace(CONFIG_PATH)
+        except OSError as exc:
+            self.set_status(f"配置保存失败：{exc}")
+        finally:
+            if temp_path is not None:
+                try:
+                    temp_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     def on_close(self):
         self.stop_typing_event.set()

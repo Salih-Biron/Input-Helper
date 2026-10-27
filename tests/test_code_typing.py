@@ -128,7 +128,6 @@ class CodeTypingTests(unittest.TestCase):
             patch.object(app, "send_unicode_text", editor.write),
             patch.object(app, "send_vk_tap", editor.tap),
             patch.object(app, "_send_inputs", editor.send_inputs),
-            patch.object(app.time, "sleep", return_value=None),
         ):
             instance.type_code_text(source, interval=0, tab_size=4)
         return editor
